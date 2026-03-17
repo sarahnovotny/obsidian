@@ -1,12 +1,18 @@
-# Obsidian Web Clipper + Archive Resolver
+# Obsidian Tooling
 
-Two tools that work together: a browser extension template clips web pages into Obsidian, and a Python script resolves the archive URLs to stable timestamped snapshots.
+Obsidian browser extension templates and supporting scripts, organized by tool.
 
-## Files
+## Structure
 
-- `templates/web-archive-clipper.json` — Obsidian Web Clipper template. Captures articles with frontmatter (`source`, `archived`, `clipped`, `published`, `author`, `site`, `description`, `tags`). The `archived` field starts as a bare Wayback redirect URL.
-- `resolve_archive_urls.py` — Resolves bare `archived:` URLs into real timestamped Wayback snapshots. Uses authenticated SPN2 API (POST), falls back to archive.ph/archive.today.
-- `run_resolve_archive.sh` — Wrapper script for launchd (contains IA API keys, gitignored).
+```
+web-archive-clipper/
+  template.json          — Web Clipper template (captures articles with archive URL)
+  resolve_archive_urls.py — Resolves bare Wayback URLs to timestamped snapshots
+youtube-transcript-clipper/
+  template.json          — Web Clipper template (captures YouTube videos with transcript)
+  obsidian_capture_yt_transcript.py — Fetches and formats YouTube transcripts
+run_resolve_archive.sh   — Wrapper script for launchd (contains IA API keys, gitignored)
+```
 
 ## Key paths
 
@@ -16,7 +22,11 @@ Two tools that work together: a browser extension template clips web pages into 
 - Log file: `~/brains-claude/Clippings-archive/.archive_resolver.log`
 - Launch agent: `~/Library/LaunchAgents/com.sarahnovotny.archive-resolver.plist`
 
-## resolve_archive_urls.py
+## web-archive-clipper
+
+The template captures articles with frontmatter (`source`, `archived`, `clipped`, `published`, `author`, `site`, `description`, `tags`). The `archived` field starts as a bare Wayback redirect URL.
+
+`resolve_archive_urls.py` resolves those into real timestamped Wayback snapshots using authenticated SPN2 API (POST), falling back to archive.ph/archive.today.
 
 Dependencies: `requests`, `python-frontmatter` (not `frontmatter` — different package).
 
@@ -26,7 +36,7 @@ State file tracks each note as `resolved`, `failed` (auto-retries after 7 days),
 
 Runs daily at 10:00 AM via launchd.
 
-## Known limitations
+### Known limitations
 
 - X/Twitter URLs are permanently blocked by Wayback (`error:blocked-url`) and archive.ph
 - archive.ph rate-limits aggressively (HTTP 429); archive.is and archive.fo have SSL issues — only archive.ph and archive.today are attempted
