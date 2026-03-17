@@ -14,9 +14,9 @@ Use the [Obsidian Web Clipper](https://obsidian.md/clipper) template to clip ind
 
 ### Usage
 
-Navigate to any YouTube video and click the Web Clipper extension. The template auto-triggers on `youtube.com/watch` URLs.
+Navigate to any YouTube video, **open the transcript panel first** (click "Show transcript" under the video description), then click the Web Clipper extension. The template auto-triggers on `youtube.com/watch` URLs.
 
-It captures the transcript directly from YouTube's transcript panel in the browser, so what you see is what you get — including any manual captions.
+The transcript is captured directly from the open transcript panel in the browser, so it must be visible when you clip. This also means you get exactly what YouTube shows — including any manual or corrected captions.
 
 ### Note format
 
