@@ -53,7 +53,18 @@ python resolve_archive_urls.py --all ~/path/to/vault/Clippings
 
 ### 4. Automate (macOS)
 
-Create a wrapper script that sets your API keys and runs the resolver with `--log`, then set up a launchd plist to run it on a schedule. See the repo's [CLAUDE.md](../CLAUDE.md) for the paths used in this project's launchd setup.
+A template launchd plist is included at [`com.example.archive-resolver.plist`](com.example.archive-resolver.plist). To use it:
+
+1. Create a wrapper script that exports your API keys and runs the resolver:
+   ```bash
+   #!/bin/bash
+   export IA_ACCESS_KEY="your-access-key"
+   export IA_SECRET_KEY="your-secret-key"
+   /path/to/python /path/to/resolve_archive_urls.py --log /path/to/vault/Clippings
+   ```
+2. Update the paths in the plist to match your setup
+3. Copy the plist to `~/Library/LaunchAgents/`
+4. Load it: `launchctl load ~/Library/LaunchAgents/com.example.archive-resolver.plist`
 
 ## State tracking
 

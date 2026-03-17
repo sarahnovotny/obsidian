@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Example launchd plist for running resolve_archive_urls.py daily.
+
+  To use:
+  1. Create a wrapper script that exports your IA_ACCESS_KEY and IA_SECRET_KEY,
+     then runs the resolver. Example:
+
+       #!/bin/bash
+       export IA_ACCESS_KEY="your-access-key"
+       export IA_SECRET_KEY="your-secret-key"
+       /path/to/python /path/to/resolve_archive_urls.py --log /path/to/vault/Clippings
+
+  2. Update the paths below to match your setup.
+  3. Copy this file to ~/Library/LaunchAgents/
+  4. Load it:  launchctl load ~/Library/LaunchAgents/com.example.archive-resolver.plist
+  5. Test it:  launchctl start com.example.archive-resolver
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.archive-resolver</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/run_resolve_archive.sh</string>
+    </array>
+
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Hour</key>
+        <integer>10</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <key>StandardErrorPath</key>
+    <string>/path/to/vault/Clippings/.archive_resolver_launchd.err</string>
+</dict>
+</plist>
