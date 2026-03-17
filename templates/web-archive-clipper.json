@@ -1,0 +1,52 @@
+{
+  "schemaVersion": "0.1.0",
+  "id": "aaa1045b-ac3e-4e96-af8f-8ec8d57c894c",
+  "name": "Web Clipper with Archive",
+  "behavior": "create",
+  "noteNameFormat": "{{date|date:\"YYYY-MM-DD\"}} {{title|safe_name}}",
+  "path": "Clippings",
+  "noteContentFormat": "{{content}}",
+  "properties": [
+    {
+      "name": "source",
+      "value": "{{url}}",
+      "type": "text"
+    },
+    {
+      "name": "archived",
+      "value": "https://web.archive.org/web/{{url}}",
+      "type": "text"
+    },
+    {
+      "name": "clipped",
+      "value": "{{date|date:\"YYYY-MM-DD\"}}",
+      "type": "date"
+    },
+    {
+      "name": "published",
+      "value": "{{published|date:\"YYYY-MM-DD\"}}",
+      "type": "date"
+    },
+    {
+      "name": "author",
+      "value": "{{author}}",
+      "type": "text"
+    },
+    {
+      "name": "site",
+      "value": "{{site}}",
+      "type": "text"
+    },
+    {
+      "name": "description",
+      "value": "{{description}}",
+      "type": "text"
+    },
+    {
+      "name": "tags",
+      "value": "clipping",
+      "type": "multitext"
+    }
+  ],
+  "triggers": []
+}
