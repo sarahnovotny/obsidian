@@ -91,8 +91,17 @@ The template captures these fields per note:
 | `description` | Page description/excerpt |
 | `tags` | `clipping` (default) |
 
+## URL cleaning
+
+Before archiving, the script automatically strips:
+- URL fragments (e.g. `#id_token=...` which may contain auth tokens)
+- Auth/session query parameters (`accessToken`, `id_token`, `token`, etc.)
+- Tracking parameters (`utm_source`, `utm_medium`, `fbclid`, `gclid`, `ref`, etc.)
+
+If a clipped page is itself already a Wayback or archive.ph snapshot (double-wrapped URL), the script detects this and uses the existing archive URL directly.
+
 ## Known limitations
 
-- **X/Twitter URLs** are permanently blocked by both Wayback Machine and archive.ph
-- **archive.ph** rate-limits automated submissions aggressively — it's used as a fallback but is unreliable
+- **X/Twitter URLs** are permanently blocked by the Wayback Machine (`error:blocked-url`)
+- **Wayback SPN2 browser crashes** on some sites — these are marked as failed and auto-retried after 7 days
 - The Wayback availability API returns `http://` URLs; the script handles both `http` and `https` schemes

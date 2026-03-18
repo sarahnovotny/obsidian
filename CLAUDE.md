@@ -26,7 +26,7 @@ run_resolve_archive.sh   — Wrapper script for launchd (contains IA API keys, g
 
 The template captures articles with frontmatter (`source`, `archived`, `clipped`, `published`, `author`, `site`, `description`, `tags`). The `archived` field starts as a bare Wayback redirect URL.
 
-`resolve_archive_urls.py` resolves those into real timestamped Wayback snapshots using authenticated SPN2 API (POST), falling back to archive.ph/archive.today.
+`resolve_archive_urls.py` resolves those into real timestamped Wayback snapshots using the authenticated SPN2 API (POST). URLs are cleaned before archiving (fragments, auth tokens, and tracking params like `utm_*` are stripped).
 
 Dependencies: `requests`, `python-frontmatter` (not `frontmatter` — different package).
 
@@ -38,12 +38,12 @@ Runs daily at 10:00 AM via launchd.
 
 ### Known limitations
 
-- X/Twitter URLs are permanently blocked by Wayback (`error:blocked-url`) and archive.ph
-- archive.ph rate-limits aggressively (HTTP 429); archive.is and archive.fo have SSL issues — only archive.ph and archive.today are attempted
+- X/Twitter URLs are permanently blocked by Wayback (`error:blocked-url`)
+- Wayback's SPN2 browser sometimes crashes on certain sites — these fail and auto-retry after 7 days
 - Wayback availability API returns `http://` URLs (not `https://`) — `is_resolved()` handles both
+- Double-wrapped Wayback URLs (clipping a page that's already archived) are detected and resolved directly
 
 ## Potential next steps
 
 - Surface `archived` as a clickable link in Obsidian via CSS snippet or Dataview query
 - Dataview dashboard showing unresolved clips
-- Store both `archived_wayback` and `archived_ph` as separate fields for redundancy

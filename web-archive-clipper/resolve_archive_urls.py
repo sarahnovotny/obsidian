@@ -6,10 +6,9 @@ Scans an Obsidian clippings folder for notes whose `archived` frontmatter
 field contains a bare Wayback Machine lookup URL and replaces it with a real
 timestamped snapshot URL.
 
-Resolution order (always attempted by default):
+Resolution order:
   1. Wayback Machine availability check (existing snapshot)
   2. Wayback Machine Save Page Now v2 (authenticated POST, polls job status)
-  3. archive.ph / archive.today (tries each mirror in turn)
 
 Authentication:
     Set IA_ACCESS_KEY and IA_SECRET_KEY environment variables with your
@@ -44,6 +43,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qs, urldefrag, urlparse, urlencode, urlunparse
 
 import requests
 import frontmatter  # pip install python-frontmatter
@@ -54,11 +54,6 @@ WAYBACK_AVAIL_API    = "https://archive.org/wayback/available"
 WAYBACK_SPN2_SAVE    = "https://web.archive.org/save"
 WAYBACK_SPN2_STATUS  = "https://web.archive.org/save/status"
 
-ARCHIVE_PH_HOSTS = [
-    "archive.ph",
-    "archive.today",
-]
-
 STATE_FILENAME = ".archive_resolver_state.json"
 LOG_FILENAME   = ".archive_resolver.log"
 LOG_MAX_RUNS   = 10
@@ -67,20 +62,21 @@ LOG_SEPARATOR  = "\n" + "═" * 60 + "\n"
 BARE_LOOKUP_RE = re.compile(
     r"^https://web\.archive\.org/web/(?!(?:19|20)\d{12}/)(.+)$"
 )
-ARCHIVE_PH_SNAP_RE = re.compile(
-    r"^https://archive\.(ph|today|is|fo)/[A-Za-z0-9]+$"
-)
-ARCHIVE_PH_JOB_RE = re.compile(
-    r"https://archive\.(ph|today|is|fo)/submit/[A-Za-z0-9]+"
-)
-
 CONNECT_TIMEOUT     = 10   # seconds
 READ_TIMEOUT        = 30   # seconds
-REQUEST_DELAY       = 1.5  # seconds between files
-PH_POLL_INTERVAL    = 6    # seconds between archive.ph status checks
-PH_POLL_MAX         = 10   # max polls (~60 s total)
+REQUEST_DELAY       = 6    # seconds between files (archive.org rate-limits aggressively)
 SPN2_POLL_TRIES     = 12   # polls after a queued save
 SPN2_POLL_SLEEP     = 5    # seconds between SPN2 status polls
+
+# Query parameters to strip from URLs before archiving
+STRIP_PARAMS = {
+    # Auth/session tokens
+    "accessToken", "access_token", "id_token", "token", "auth",
+    # UTM tracking
+    "utm_source", "utm_medium", "utm_campaign", "utm_term", "utm_content",
+    # Common referral/tracking
+    "ref", "referer", "referrer", "fbclid", "gclid", "mc_cid", "mc_eid",
+}
 
 DEFAULT_RETRY_AFTER_DAYS = 7
 
@@ -164,16 +160,37 @@ def should_skip(state: dict, key: str, retry_failed: bool, retry_after_days: int
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
 def is_resolved(url: str) -> bool:
-    if ARCHIVE_PH_SNAP_RE.match(url):
-        return True
     if re.match(r"^https?://web\.archive\.org/web/(?:19|20)\d{12}/", url):
+        return True
+    if re.match(r"^https?://archive\.(ph|today|is|fo)/[A-Za-z0-9]+$", url):
         return True
     return False
 
 
+def clean_url(url: str) -> str:
+    """Strip fragments (may contain auth tokens) and tracking/auth query params."""
+    url, _ = urldefrag(url)
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query, keep_blank_values=True)
+    cleaned = {k: v for k, v in params.items() if k not in STRIP_PARAMS}
+    new_query = urlencode(cleaned, doseq=True) if cleaned else ""
+    return urlunparse(parsed._replace(query=new_query))
+
+
 def extract_original_url(archived: str) -> str | None:
     m = BARE_LOOKUP_RE.match(archived)
-    return m.group(1) if m else None
+    if not m:
+        return None
+    return clean_url(m.group(1))
+
+
+def is_already_archived(url: str) -> bool:
+    """Check if a URL is itself a Wayback or archive.ph snapshot."""
+    if re.match(r"^https?://web\.archive\.org/web/", url):
+        return True
+    if re.match(r"^https?://archive\.(ph|today|is|fo)/", url):
+        return True
+    return False
 
 
 def get_ia_auth() -> dict | None:
@@ -296,83 +313,6 @@ def wayback_save(original_url: str) -> str | None:
     return None
 
 
-# ── archive.ph (with mirror fallback) ────────────────────────────────────────
-
-_PH_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/123.0.0.0 Safari/537.36"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-}
-
-
-def _parse_ph_response(resp: requests.Response) -> str | None:
-    """Extract a snapshot or job URL from an archive.ph response."""
-    if ARCHIVE_PH_SNAP_RE.match(resp.url):
-        return resp.url
-    for header in ("Refresh", "Location"):
-        val = resp.headers.get(header, "")
-        m = re.search(r"(https://archive\.(?:ph|today|is|fo)/[A-Za-z0-9]+)$", val)
-        if m:
-            return m.group(1)
-    m = re.search(r"https://archive\.(?:ph|today|is|fo)/(?:submit/)?[A-Za-z0-9]+",
-                  resp.text[:4000])
-    return m.group(0) if m else None
-
-
-def _poll_ph_job(job_url: str) -> str | None:
-    for i in range(PH_POLL_MAX):
-        time.sleep(PH_POLL_INTERVAL)
-        print(f"    ⏳ archive.ph processing… ({i + 1}/{PH_POLL_MAX})")
-        try:
-            resp = requests.get(
-                job_url, headers=_PH_HEADERS,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-                allow_redirects=True,
-            )
-            result = _parse_ph_response(resp)
-            if result and not ARCHIVE_PH_JOB_RE.match(result):
-                return result
-        except requests.RequestException:
-            pass
-    return None
-
-
-def archive_ph_save(original_url: str) -> str | None:
-    """Try each archive.ph mirror in turn until one succeeds."""
-    for host in ARCHIVE_PH_HOSTS:
-        submit_url = f"https://{host}/submit/"
-        print(f"    Trying {host} …")
-        try:
-            resp = requests.post(
-                submit_url,
-                data={"url": original_url, "anyway": "1"},
-                headers=_PH_HEADERS,
-                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-                allow_redirects=True,
-            )
-        except requests.Timeout:
-            print(f"    ⚠  {host} timed out — trying next mirror.", file=sys.stderr)
-            continue
-        except requests.RequestException as exc:
-            print(f"    ⚠  {host} error: {exc}", file=sys.stderr)
-            continue
-
-        result = _parse_ph_response(resp)
-        if not result:
-            print(f"    ⚠  {host} returned unexpected response (HTTP {resp.status_code}).",
-                  file=sys.stderr)
-            continue
-
-        if ARCHIVE_PH_JOB_RE.match(result):
-            return _poll_ph_job(result)
-        return result
-
-    return None
-
-
 # ── Core logic ───────────────────────────────────────────────────────────────
 
 def resolve(original_url: str, check_only: bool) -> tuple[str | None, str]:
@@ -389,11 +329,6 @@ def resolve(original_url: str, check_only: bool) -> tuple[str | None, str]:
         return None, "blocked"
     if result:
         return result, "Wayback (saved)"
-
-    print("    Wayback save failed — trying archive.ph mirrors …")
-    url = archive_ph_save(original_url)
-    if url:
-        return url, "archive.ph"
 
     return None, ""
 
@@ -416,6 +351,17 @@ def process_file(path: Path, dry_run: bool, check_only: bool, reprocess_all: boo
     original_url = extract_original_url(archived)
     if not original_url:
         return None
+
+    # If the "original" URL is itself already an archive snapshot (double-wrapped),
+    # use it directly as the resolved URL instead of trying to re-archive it
+    if is_already_archived(original_url):
+        print(f"  → {original_url}")
+        print(f"    ✓ [already archived] {original_url}")
+        if not dry_run:
+            post["archived"] = original_url
+            with open(path, "wb") as f:
+                frontmatter.dump(post, f)
+        return original_url
 
     print(f"  → {original_url}")
 
@@ -510,6 +456,7 @@ def scan_vault(
                         "url": archived,
                         "failed_at": datetime.now(timezone.utc).isoformat(),
                     }
+                time.sleep(REQUEST_DELAY)  # rate-limit even after failures
             else:
                 skipped += 1
 
