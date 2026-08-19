@@ -119,7 +119,49 @@ def test_wayback_check_treats_503_as_rate_limiting(monkeypatch):
         wayback_check("https://x.com")
 
 
-def test_ordinary_http_error_is_not_ratelimited(monkeypatch):
+def test_ordinary_http_error_is_transient_not_definitive(monkeypatch):
     monkeypatch.setattr(rau.requests, "get", lambda *a, **k: _Resp(404))
     monkeypatch.setattr(rau.time, "sleep", lambda s: None)
+    with pytest.raises(TransientCheckError):
+        wayback_check("https://x.com")
+
+
+from resolve_archive_urls import TransientCheckError
+
+
+def test_timeout_is_transient_not_a_definitive_negative(monkeypatch):
+    def boom(*a, **k):
+        raise rau.requests.ReadTimeout("too slow")
+    monkeypatch.setattr(rau.requests, "get", boom)
+    monkeypatch.setattr(rau.time, "sleep", lambda s: None)
+    with pytest.raises(TransientCheckError):
+        wayback_check("https://x.com")
+
+
+def test_connection_error_is_transient(monkeypatch):
+    def boom(*a, **k):
+        raise rau.requests.ConnectionError("no route")
+    monkeypatch.setattr(rau.requests, "get", boom)
+    monkeypatch.setattr(rau.time, "sleep", lambda s: None)
+    with pytest.raises(TransientCheckError):
+        wayback_check("https://x.com")
+
+
+def test_403_is_transient(monkeypatch):
+    monkeypatch.setattr(rau.requests, "get", lambda *a, **k: _Resp(403))
+    monkeypatch.setattr(rau.time, "sleep", lambda s: None)
+    with pytest.raises(TransientCheckError):
+        wayback_check("https://x.com")
+
+
+def test_clean_no_snapshot_is_still_a_definitive_none(monkeypatch):
+    monkeypatch.setattr(rau.requests, "get",
+                        lambda *a, **k: _Resp(200, {"archived_snapshots": {}}))
     assert wayback_check("https://x.com") is None
+
+
+def test_rate_limit_still_raises_ratelimited_not_transient(monkeypatch):
+    monkeypatch.setattr(rau.requests, "get", lambda *a, **k: _Resp(429))
+    monkeypatch.setattr(rau.time, "sleep", lambda s: None)
+    with pytest.raises(RateLimited):
+        wayback_check("https://x.com")

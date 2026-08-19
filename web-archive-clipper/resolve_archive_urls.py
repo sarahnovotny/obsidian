@@ -240,6 +240,15 @@ class RateLimited(Exception):
     """archive.org kept throttling us after the full backoff schedule."""
 
 
+class TransientCheckError(Exception):
+    """A per-URL failure that says nothing about whether a snapshot exists.
+
+    Timeouts, connection failures and 403s must never be recorded as a
+    definitive "no snapshot", because `failed` state rows are suppressed for
+    DEFAULT_RETRY_AFTER_DAYS.
+    """
+
+
 RATE_LIMIT_STATUSES = frozenset({429, 503})
 RATE_LIMIT_BACKOFF = (15, 45, 120)  # seconds to wait before each retry
 
@@ -269,14 +278,16 @@ def wayback_check(original_url: str) -> str | None:
                     f"archive.org returned {resp.status_code} after "
                     f"{len(RATE_LIMIT_BACKOFF) + 1} attempts"
                 )
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                raise TransientCheckError(
+                    f"archive.org returned {resp.status_code}; treating as unknown"
+                )
             closest = resp.json().get("archived_snapshots", {}).get("closest", {})
             if closest.get("available"):
                 return closest["url"]
             return None
         except requests.RequestException as exc:
-            print(f"    ⚠  Wayback check error: {exc}", file=sys.stderr)
-            return None
+            raise TransientCheckError(f"{type(exc).__name__}: {exc}") from exc
     return None
 
 
@@ -499,6 +510,11 @@ def scan_vault(
             if not dry_run:
                 save_state(clippings_dir, state)
             return
+        except TransientCheckError as exc:
+            print(f"    ↻ {exc}")
+            print("      Leaving unrecorded so it is retried next run.")
+            time.sleep(REQUEST_DELAY)
+            continue
 
         if snapshot_url == "BLOCKED":
             blocked += 1
