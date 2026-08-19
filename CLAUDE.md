@@ -17,9 +17,9 @@ run_resolve_archive.sh   — Wrapper script for launchd (contains IA API keys, g
 ## Key paths
 
 - Python venv: `~/Github/python3.12-venv/`
-- Vault clippings: `~/brains-claude/Clippings-archive/`
-- State file: `~/brains-claude/Clippings-archive/.archive_resolver_state.json`
-- Log file: `~/brains-claude/Clippings-archive/.archive_resolver.log`
+- Vault clippings: `~/Obsidian/brains-claude/clippings-archive/`
+- State file: `~/Obsidian/brains-claude/clippings-archive/.archive_resolver_state.json`
+- Log file: `~/Obsidian/brains-claude/clippings-archive/.archive_resolver.log`
 - Launch agent: `~/Library/LaunchAgents/com.sarahnovotny.archive-resolver.plist`
 
 ## web-archive-clipper

@@ -1,0 +1,311 @@
+#!/Users/sarahnovotny/Github/python3.12-venv/bin/python
+"""pdf-clip — clip a PDF from a URL into raw/papers/ with a provenance frontmatter sidecar.
+
+Mirrors the Obsidian Web Clipper output for HTML: same frontmatter shape, same
+authenticated SPN2 flow. The sidecar lives next to the PDF; the existing ingest
+workflow reads it the same way it reads raw/articles/*.md.
+
+Workflow:
+    1. Fetch IA SPN2 keys from macOS Keychain.
+    2. Download the PDF to <dest>/<slug>.pdf.
+    3. Extract Title / Author / Subject / CreationDate via `pdfinfo`.
+    4. Submit URL to Wayback Save Page Now (authenticated POST + poll).
+       On failure, fall back to a bare Wayback redirect URL — the daily
+       resolve_archive_urls.py picks it up later.
+    5. Write <dest>/<slug>.md sidecar with the HTML-clipper frontmatter shape.
+    6. Optionally open the sidecar in $EDITOR for human verification.
+
+Usage:
+    pdf-clip <pdf-url> [--slug <slug>] [--dest <dir>] [--no-spn2] [--editor]
+
+Requirements:
+    - poppler (`pdfinfo`, `pdftotext`) on PATH
+    - Python deps: requests, python-frontmatter
+    - IA SPN2 keys in Keychain as 'ia-spn2-access-key' and 'ia-spn2-secret-key'
+      (see ../run_resolve_archive.sh for the storage pattern)
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import re
+import subprocess
+import sys
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.parse import urlparse
+
+import frontmatter  # python-frontmatter
+import requests
+
+# Reuse the resolver's SPN2 helpers — single source of truth for SPN2 quirks.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "web-archive-clipper"))
+from resolve_archive_urls import (  # noqa: E402
+    RateLimited,
+    TransientCheckError,
+    clean_url,
+    wayback_check,
+    wayback_save,
+)
+
+DEFAULT_DEST = Path.home() / "Obsidian" / "brains-claude" / "llm-wiki" / "raw" / "papers"
+
+
+def _friendly(p: Path) -> str:
+    """Show paths as ~/... when under HOME, otherwise absolute."""
+    try:
+        return f"~/{p.relative_to(Path.home())}"
+    except ValueError:
+        return str(p)
+KEYCHAIN_ACCESS_ITEM = "ia-spn2-access-key"
+KEYCHAIN_SECRET_ITEM = "ia-spn2-secret-key"
+USER_AGENT = "pdf-clip/1.0 (Obsidian PDF clipper; https://github.com/sarahnovotny/obsidian)"
+DOWNLOAD_TIMEOUT = (10, 180)  # (connect, read) seconds
+
+
+# ── Keychain ────────────────────────────────────────────────────────────────
+
+def keychain_get(item_name: str) -> str | None:
+    try:
+        out = subprocess.check_output(
+            ["security", "find-generic-password", "-a", os.environ["USER"], "-s", item_name, "-w"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        return out.strip() or None
+    except subprocess.CalledProcessError:
+        return None
+
+
+def load_ia_credentials_into_env() -> bool:
+    access = keychain_get(KEYCHAIN_ACCESS_ITEM)
+    secret = keychain_get(KEYCHAIN_SECRET_ITEM)
+    if not access or not secret:
+        return False
+    os.environ["IA_ACCESS_KEY"] = access
+    os.environ["IA_SECRET_KEY"] = secret
+    return True
+
+
+# ── PDF helpers ─────────────────────────────────────────────────────────────
+
+def slugify(text: str, max_len: int = 80) -> str:
+    text = re.sub(r"[^\w\s-]", "", text).strip().lower()
+    text = re.sub(r"[\s_-]+", "-", text)
+    return text[:max_len].strip("-")
+
+
+def fetch_pdf(url: str, dest_path: Path) -> int:
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/pdf,*/*"}
+    with requests.get(url, headers=headers, stream=True, timeout=DOWNLOAD_TIMEOUT) as r:
+        r.raise_for_status()
+        ct = r.headers.get("Content-Type", "").lower()
+        if "pdf" not in ct and not url.lower().split("?")[0].endswith(".pdf"):
+            print(f"⚠  Content-Type is {ct!r}, not PDF — proceeding anyway", file=sys.stderr)
+        size = 0
+        with open(dest_path, "wb") as f:
+            for chunk in r.iter_content(chunk_size=65536):
+                f.write(chunk)
+                size += len(chunk)
+        return size
+
+
+def pdf_metadata(pdf_path: Path) -> dict[str, str]:
+    try:
+        out = subprocess.check_output(["pdfinfo", str(pdf_path)], text=True)
+    except (subprocess.CalledProcessError, FileNotFoundError) as exc:
+        print(f"⚠  pdfinfo failed: {exc}", file=sys.stderr)
+        return {}
+    meta: dict[str, str] = {}
+    for line in out.splitlines():
+        if ":" not in line:
+            continue
+        key, _, val = line.partition(":")
+        meta[key.strip()] = val.strip()
+    return meta
+
+
+def first_page_text(pdf_path: Path, max_chars: int = 600) -> str:
+    try:
+        out = subprocess.check_output(
+            ["pdftotext", "-l", "1", str(pdf_path), "-"], text=True
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+    return re.sub(r"\s+", " ", out).strip()[:max_chars]
+
+
+def parse_pdf_date(s: str) -> str:
+    """pdfinfo CreationDate format: 'Mon Apr 20 16:47:03 2026 IST'. Return YYYY-MM-DD or ''."""
+    if not s:
+        return ""
+    for fmt in ("%a %b %d %H:%M:%S %Y %Z", "%a %b %d %H:%M:%S %Y"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    # Fallback: extract any 4-digit year as a last resort
+    m = re.search(r"\b(19|20)\d{2}\b", s)
+    return m.group(0) if m else ""
+
+
+# ── SPN2 (delegates to sibling resolver) ────────────────────────────────────
+
+def archive_url_for(source_url: str, skip_spn2: bool) -> tuple[str, str]:
+    """Return (archived_url, status). status ∈ {'pinned', 'existing', 'bare'}."""
+    if skip_spn2:
+        return f"https://web.archive.org/web/{source_url}", "bare"
+
+    cleaned = clean_url(source_url)
+    bare = (f"https://web.archive.org/web/{cleaned}", "bare")
+
+    # wayback_check/wayback_save raise on anything that is not a definitive
+    # answer — throttling, timeouts, 403s, malformed replies, absent IA
+    # credentials. For a one-shot clip none of those is fatal: fall back to the
+    # bare lookup URL, exactly as an unsuccessful save already does, and let the
+    # hourly resolver upgrade it later.
+    print(f"🌐 Wayback check: {cleaned}")
+    try:
+        existing = wayback_check(cleaned)
+    except (TransientCheckError, RateLimited) as exc:
+        print(f"   ⚠  Wayback check inconclusive ({exc}) — sidecar will carry bare URL.")
+        return bare
+    if existing:
+        return existing, "existing"
+
+    print("   No existing snapshot — submitting Save-Page-Now …")
+    try:
+        saved = wayback_save(cleaned)
+    except (TransientCheckError, RateLimited) as exc:
+        print(f"   ⚠  Wayback save inconclusive ({exc}) — sidecar will carry bare URL.")
+        return bare
+    if saved and saved != "BLOCKED":
+        return saved, "pinned"
+
+    reason = "blocked" if saved == "BLOCKED" else "save failed"
+    print(f"   ⚠  Wayback {reason} — sidecar will carry bare URL; daily resolver will retry.")
+    return bare
+
+
+# ── Sidecar ─────────────────────────────────────────────────────────────────
+
+def write_sidecar(
+    sidecar_path: Path,
+    pdf_filename: str,
+    source_url: str,
+    archived_url: str,
+    meta: dict[str, str],
+    description_fallback: str,
+) -> None:
+    site = urlparse(source_url).netloc
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    published = parse_pdf_date(meta.get("CreationDate", ""))
+    title = meta.get("Title", "").strip() or sidecar_path.stem
+    author = meta.get("Author", "").strip()
+    subject = meta.get("Subject", "").strip()
+    description = subject or description_fallback
+
+    # Frontmatter shape mirrors web-archive-clipper/template.json exactly.
+    fm = {
+        "source": source_url,
+        "archived": archived_url,
+        "clipped": today,
+        "published": published,
+        "author": author,
+        "site": site,
+        "description": description,
+        "tags": ["clipping"],
+    }
+    body = f"# {title}\n\nPDF: [[{pdf_filename}]]\n"
+    post = frontmatter.Post(body, **fm)
+    with open(sidecar_path, "wb") as f:
+        frontmatter.dump(post, f)
+
+
+# ── Main ────────────────────────────────────────────────────────────────────
+
+def main() -> None:
+    ap = argparse.ArgumentParser(
+        description="Clip a PDF from URL + write Obsidian-Web-Clipper-shape sidecar with provenance."
+    )
+    ap.add_argument("url", help="URL of the PDF to clip")
+    ap.add_argument("--slug", help="Override auto-generated filename slug (omit .pdf extension)")
+    ap.add_argument("--dest", type=Path, default=DEFAULT_DEST,
+                    help=f"Destination directory (default: {DEFAULT_DEST})")
+    ap.add_argument("--no-spn2", action="store_true",
+                    help="Skip Wayback save; sidecar carries bare redirect URL for the resolver to pick up")
+    ap.add_argument("--editor", action="store_true",
+                    help="Open the sidecar in $EDITOR after writing for human verification")
+    args = ap.parse_args()
+
+    dest: Path = args.dest.expanduser().resolve()
+    if not dest.is_dir():
+        sys.exit(f"❌ Destination {dest} does not exist or is not a directory.")
+
+    if not args.no_spn2 and not load_ia_credentials_into_env():
+        sys.exit(
+            f"❌ IA SPN2 keys not found in Keychain (items '{KEYCHAIN_ACCESS_ITEM}' and "
+            f"'{KEYCHAIN_SECRET_ITEM}'). Re-run with --no-spn2 to skip Wayback save, or "
+            "store keys per ../run_resolve_archive.sh."
+        )
+
+    # 1. Download to temp path; rename after we know the slug.
+    tmp = dest / f".pdf-clip-tmp-{int(time.time())}.pdf"
+    print(f"⏬ Downloading {args.url}")
+    try:
+        size = fetch_pdf(args.url, tmp)
+    except requests.RequestException as exc:
+        if tmp.exists():
+            tmp.unlink()
+        sys.exit(f"❌ Download failed: {exc}")
+    print(f"   {size / 1024:.1f} KB")
+
+    # 2. Metadata
+    meta = pdf_metadata(tmp)
+    title = meta.get("Title", "").strip()
+    print(f"📄 Title:  {title or '(none)'}")
+    print(f"   Author: {meta.get('Author', '(none)')}")
+    print(f"   Pages:  {meta.get('Pages', '?')}")
+
+    # 3. Slug + collision check
+    slug = args.slug or slugify(title)
+    if not slug:
+        tmp.unlink()
+        sys.exit("❌ No PDF Title metadata and no --slug provided. Re-run with --slug.")
+
+    pdf_path = dest / f"{slug}.pdf"
+    sidecar_path = dest / f"{slug}.md"
+    if pdf_path.exists() or sidecar_path.exists():
+        tmp.unlink()
+        sys.exit(f"❌ Collision: {slug}.pdf or {slug}.md already exists. Re-run with --slug <other>.")
+
+    tmp.rename(pdf_path)
+    print(f"💾 PDF:     {_friendly(pdf_path)}")
+
+    # 4. Wayback
+    archived_url, archive_status = archive_url_for(args.url, args.no_spn2)
+    icon = {"pinned": "✓", "existing": "✓", "bare": "⚠"}[archive_status]
+    print(f"   {icon} archived ({archive_status}): {archived_url}")
+
+    # 5. Sidecar
+    write_sidecar(
+        sidecar_path,
+        pdf_filename=pdf_path.name,
+        source_url=args.url,
+        archived_url=archived_url,
+        meta=meta,
+        description_fallback=first_page_text(pdf_path),
+    )
+    print(f"📝 Sidecar: {_friendly(sidecar_path)}")
+
+    # 6. Optional verification
+    if args.editor:
+        editor = os.environ.get("EDITOR", "vi")
+        subprocess.run([editor, str(sidecar_path)])
+
+    print("✅ Done. Verify Title / Author / Description in the sidecar before relying on it.")
+
+
+if __name__ == "__main__":
+    main()

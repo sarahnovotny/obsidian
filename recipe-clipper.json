@@ -1,0 +1,26 @@
+{
+  "schemaVersion": "0.1.0",
+  "id": "aa46980d-157a-4e6a-8858-7e1730fd963c",
+  "name": "Recipe",
+  "behavior": "create",
+  "noteNameFormat": "{{schema:@Recipe:name|safe_name}}",
+  "path": "Recipes",
+  "noteContentFormat": "{{schema:@Recipe:description}}\n\n## Ingredients\n\n{% for ing in schema:@Recipe:recipeIngredient %}\n- [ ] {{ing}}\n{% endfor %}\n\n## Instructions\n\n{% for step in schema:@Recipe:recipeInstructions %}\n{{loop.index}}. {{step.text ?? step}}\n{% endfor %}\n\n## Notes\n\n",
+  "properties": [
+    {"name": "source",      "value": "{{url}}",                                 "type": "text"},
+    {"name": "archived",    "value": "https://web.archive.org/web/{{url}}",     "type": "text"},
+    {"name": "author",      "value": "{{schema:@Recipe:author.name}}",          "type": "text"},
+    {"name": "description", "value": "{{schema:@Recipe:description}}",          "type": "text"},
+    {"name": "cuisine",     "value": "{{schema:@Recipe:recipeCuisine}}",        "type": "text"},
+    {"name": "course",      "value": "{{schema:@Recipe:recipeCategory}}",       "type": "text"},
+    {"name": "servings",    "value": "{{schema:@Recipe:recipeYield|last}}",     "type": "text"},
+    {"name": "prep_time",   "value": "{{schema:@Recipe:prepTime|duration}}",    "type": "text"},
+    {"name": "cook_time",   "value": "{{schema:@Recipe:cookTime|duration}}",    "type": "text"},
+    {"name": "total_time",  "value": "{{schema:@Recipe:totalTime|duration}}",   "type": "text"},
+    {"name": "calories",    "value": "{{schema:@Recipe:nutrition.calories}}",   "type": "text"},
+    {"name": "rating",      "value": "",                                        "type": "number"},
+    {"name": "clipped",     "value": "{{date|date:\"YYYY-MM-DD\"}}",            "type": "date"},
+    {"name": "tags",        "value": "recipe",                                  "type": "multitext"}
+  ],
+  "triggers": ["schema:@Recipe"]
+}
