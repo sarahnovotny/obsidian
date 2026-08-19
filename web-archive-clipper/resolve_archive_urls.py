@@ -29,6 +29,7 @@ Options:
     --all           Re-resolve notes that already have a resolved URL
     --retry-failed  Retry URLs that previously failed
     --retry-after N Retry failures older than N days (default: 7)
+    --from-source   Derive a Wayback lookup URL from `source:` when `archived` is empty
 
 Requirements:
     pip install requests python-frontmatter
@@ -196,6 +197,35 @@ def is_already_archived(url: str) -> bool:
     return False
 
 
+def synthesize_lookup_url(source: str | None) -> str | None:
+    """Build a bare Wayback lookup URL from a note's `source:` field.
+
+    Returns None when there is nothing usable to build from, so callers can
+    treat "no source" and "source is itself an archive link" identically.
+    """
+    if not source or not isinstance(source, str):
+        return None
+    source = source.strip()
+    if not source.startswith(("http://", "https://")):
+        return None
+    if is_already_archived(source):
+        return None
+    return f"https://web.archive.org/web/{source}"
+
+
+def effective_archived(post, from_source: bool) -> str:
+    """The `archived` value to act on for this note.
+
+    Normally the frontmatter value verbatim. With --from-source, an empty or
+    absent `archived` falls back to a lookup URL synthesized from `source:`.
+    An existing value is never overwritten.
+    """
+    archived = post.get("archived", "") or ""
+    if archived or not from_source:
+        return archived
+    return synthesize_lookup_url(post.get("source", "")) or ""
+
+
 def get_ia_auth() -> dict | None:
     access = os.environ.get("IA_ACCESS_KEY", "")
     secret = os.environ.get("IA_SECRET_KEY", "")
@@ -336,7 +366,8 @@ def resolve(original_url: str, check_only: bool) -> tuple[str | None, str]:
     return None, ""
 
 
-def process_file(path: Path, dry_run: bool, check_only: bool, reprocess_all: bool) -> str | None:
+def process_file(path: Path, dry_run: bool, check_only: bool, reprocess_all: bool,
+                 from_source: bool = False) -> str | None:
     """Returns the snapshot URL on success, or None on failure/skip."""
     try:
         post = frontmatter.load(str(path))
@@ -344,7 +375,7 @@ def process_file(path: Path, dry_run: bool, check_only: bool, reprocess_all: boo
         print(f"  ⚠  Could not parse {path.name}: {exc}", file=sys.stderr)
         return None
 
-    archived: str = post.get("archived", "")
+    archived: str = effective_archived(post, from_source)
     if not archived:
         return None
 
@@ -395,6 +426,7 @@ def scan_vault(
     reprocess_all: bool,
     retry_failed: bool,
     retry_after_days: int,
+    from_source: bool,
 ) -> None:
     md_files = sorted(clippings_dir.rglob("*.md"))
     if not md_files:
@@ -416,7 +448,7 @@ def scan_vault(
         # Pre-check: if already resolved in frontmatter, record in state and skip
         try:
             post = frontmatter.load(str(path))
-            archived = post.get("archived", "")
+            archived = effective_archived(post, from_source)
         except Exception:
             archived = ""
 
@@ -431,7 +463,7 @@ def scan_vault(
             continue
 
         print(f"\n📄 {path.name}")
-        snapshot_url = process_file(path, dry_run, check_only, reprocess_all)
+        snapshot_url = process_file(path, dry_run, check_only, reprocess_all, from_source)
 
         if snapshot_url == "BLOCKED":
             blocked += 1
@@ -498,6 +530,9 @@ def main() -> None:
     parser.add_argument("--retry-after", type=int, default=DEFAULT_RETRY_AFTER_DAYS,
                         metavar="DAYS",
                         help=f"Auto-retry failures older than N days (default: {DEFAULT_RETRY_AFTER_DAYS})")
+    parser.add_argument("--from-source", action="store_true", dest="from_source",
+                        help="When `archived` is empty, synthesize a Wayback lookup "
+                             "URL from the note's `source:` field")
     parser.add_argument("--log", action="store_true",
                         help="Write output to .archive_resolver.log in the clippings dir (keeps last 10 runs)")
     args = parser.parse_args()
@@ -530,6 +565,7 @@ def main() -> None:
         args.reprocess_all,
         args.retry_failed,
         args.retry_after,
+        args.from_source,
     )
 
 
