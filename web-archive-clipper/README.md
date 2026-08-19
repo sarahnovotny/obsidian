@@ -51,6 +51,17 @@ python resolve_archive_urls.py --retry-failed ~/path/to/vault/Clippings
 python resolve_archive_urls.py --all ~/path/to/vault/Clippings
 ```
 
+#### Optional: curated archive pattern
+
+Instead of pointing the resolver at your live clippings folder, you can run it against a curated *archive* folder you move notes into after review. The live folder stays small and churn-friendly; the archive folder accumulates the permanent-link-resolved record.
+
+```
+Clippings/          ← Web Clipper writes here; you triage and review
+Clippings-archive/  ← you move keepers here; resolver points at this folder
+```
+
+The script behaves identically against either target — this is purely a workflow choice. Useful when you clip widely and only want pinned Wayback URLs on the subset you've curated.
+
 ### 4. Automate (macOS)
 
 A template launchd plist is included at [`com.example.archive-resolver.plist`](com.example.archive-resolver.plist). To use it:

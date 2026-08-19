@@ -87,11 +87,14 @@ def setup_logging(clippings_dir: Path) -> None:
     """Redirect stdout and stderr to a log file, keeping only the last N runs."""
     log_path = clippings_dir / LOG_FILENAME
 
-    # Read existing log and trim to last (N-1) runs so this run makes N
+    # Read existing log and trim to last (N-1) runs so this run makes N.
+    # Use errors='replace' so a previously-truncated UTF-8 character in the log
+    # doesn't crash the next run (precedent: clippings-archive log mid-character
+    # cut at byte 13887 caused 200+ hourly failures before being caught).
     existing = ""
     if log_path.exists():
         try:
-            existing = log_path.read_text()
+            existing = log_path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             pass
 
