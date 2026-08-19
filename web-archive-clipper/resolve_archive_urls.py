@@ -25,11 +25,14 @@ Usage:
 
 Options:
     --dry-run       Show what would change without writing files or state
-    --check-only    Only look for existing snapshots; never submit new ones
+    --allow-save    Arm live Wayback Save-Now submissions (default: check-only,
+                     only look for existing snapshots; never submit new ones)
+    --check-only    No-op alias kept for compatibility; check-only is now default
     --all           Re-resolve notes that already have a resolved URL
     --retry-failed  Retry URLs that previously failed
     --retry-after N Retry failures older than N days (default: 7)
     --from-source   Derive a Wayback lookup URL from `source:` when `archived` is empty
+    --max-files N   Stop after processing N files this run (default: 0, unlimited)
 
 Requirements:
     pip install requests python-frontmatter
@@ -278,14 +281,19 @@ def wayback_check(original_url: str) -> str | None:
                     f"archive.org returned {resp.status_code} after "
                     f"{len(RATE_LIMIT_BACKOFF) + 1} attempts"
                 )
-            if resp.status_code >= 400:
+            if resp.status_code != 200:
                 raise TransientCheckError(
                     f"archive.org returned {resp.status_code}; treating as unknown"
                 )
-            closest = resp.json().get("archived_snapshots", {}).get("closest", {})
-            if closest.get("available"):
-                return closest["url"]
-            return None
+            try:
+                closest = resp.json().get("archived_snapshots", {}).get("closest", {})
+                if closest.get("available"):
+                    return closest["url"]
+                return None
+            except (AttributeError, KeyError, TypeError) as exc:
+                raise TransientCheckError(
+                    f"unexpected availability response shape: {exc}"
+                ) from exc
         except requests.RequestException as exc:
             raise TransientCheckError(f"{type(exc).__name__}: {exc}") from exc
     return None
@@ -295,11 +303,19 @@ def wayback_save(original_url: str) -> str | None:
     """
     Submit a save request via Wayback SPN2 (authenticated POST).
     Polls the job status endpoint until complete or timed out.
+
+    Returns a snapshot URL, the "BLOCKED" sentinel for a definitive Wayback
+    block, or None for the one case where SPN2 explicitly reports it could
+    not archive the URL. Every other failure mode — missing credentials,
+    connection/request errors, a non-200 response, a non-JSON body, or a
+    poll timeout — says nothing about whether the URL is archivable, so it
+    raises TransientCheckError instead. A wrongly recorded "failed" row is
+    suppressed for DEFAULT_RETRY_AFTER_DAYS, so a wrong negative is expensive.
     """
     auth = get_ia_auth()
     if not auth:
         print("    ⚠  No IA credentials — set IA_ACCESS_KEY and IA_SECRET_KEY")
-        return None
+        raise TransientCheckError("no IA credentials configured")
 
     # Submit the save request
     try:
@@ -311,11 +327,11 @@ def wayback_save(original_url: str) -> str | None:
         )
     except requests.RequestException as exc:
         print(f"    ⚠  SPN2 save request error: {exc}", file=sys.stderr)
-        return None
+        raise TransientCheckError(f"{type(exc).__name__}: {exc}") from exc
 
     if resp.status_code != 200:
         print(f"    ⚠  SPN2 returned HTTP {resp.status_code}: {resp.text[:200]}")
-        return None
+        raise TransientCheckError(f"SPN2 returned HTTP {resp.status_code}")
 
     # Check Content-Type — SPN2 sometimes returns HTML instead of JSON
     content_type = resp.headers.get("Content-Type", "")
@@ -324,15 +340,18 @@ def wayback_save(original_url: str) -> str | None:
         if "/web/" in resp.url and resp.url != WAYBACK_SPN2_SAVE:
             return resp.url
         print(f"    ⚠  SPN2 returned non-JSON ({content_type}): {resp.text[:200]}")
-        return None
+        raise TransientCheckError(f"SPN2 returned non-JSON response ({content_type})")
 
     try:
         data = resp.json()
-    except ValueError:
+    except ValueError as exc:
         print(f"    ⚠  SPN2 response not parseable: {resp.text[:200]}")
-        return None
+        raise TransientCheckError(f"SPN2 response not parseable: {exc}") from exc
 
-    # Check for blocked-url error
+    # Check for blocked-url error. This — and the "error" verdict returned
+    # from the status poll below — are the one case where SPN2 has
+    # explicitly reported it could not (or would not) archive the URL: a
+    # genuine, definitive verdict, not a transient failure.
     if data.get("status") == "error":
         status_ext = data.get("status_ext", "")
         msg = data.get("message", "unknown error")
@@ -349,7 +368,7 @@ def wayback_save(original_url: str) -> str | None:
         if url:
             return f"https://web.archive.org/web/{data.get('timestamp', '')}/{url}"
         print(f"    ⚠  SPN2 returned no job_id: {data}", file=sys.stderr)
-        return None
+        raise TransientCheckError(f"SPN2 returned no job_id: {data}")
 
     print(f"    Save job queued: {job_id}")
 
@@ -381,7 +400,7 @@ def wayback_save(original_url: str) -> str | None:
         # else "pending" — keep polling
 
     print("    ⚠  SPN2 save timed out waiting for completion.")
-    return None
+    raise TransientCheckError("SPN2 save timed out waiting for completion")
 
 
 # ── Core logic ───────────────────────────────────────────────────────────────
@@ -465,6 +484,7 @@ def scan_vault(
     retry_failed: bool,
     retry_after_days: int,
     from_source: bool,
+    max_files: int = 0,
 ) -> None:
     md_files = sorted(clippings_dir.rglob("*.md"))
     if not md_files:
@@ -473,8 +493,16 @@ def scan_vault(
 
     state = load_state(clippings_dir)
     updated = skipped = failed = blocked = 0
+    processed = 0
 
     for path in md_files:
+        # --max-files caps forward-progress processing (not state-skipped
+        # files) so an hourly run doesn't spend its whole budget rechecking
+        # the head of the alphabet and never reach the tail.
+        if max_files and processed >= max_files:
+            print(f"\n⏹  Reached --max-files {max_files}; stopping for this run.")
+            break
+
         key = state_key(path)
 
         # Check state file — skip already-resolved or recently-failed
@@ -500,6 +528,7 @@ def scan_vault(
             skipped += 1
             continue
 
+        processed += 1
         print(f"\n📄 {path.name}")
         try:
             snapshot_url = process_file(path, dry_run, check_only, reprocess_all, from_source)
@@ -524,6 +553,7 @@ def scan_vault(
                     "url": archived,
                     "blocked_at": datetime.now(timezone.utc).isoformat(),
                 }
+            time.sleep(REQUEST_DELAY)
         elif snapshot_url:
             updated += 1
             if not dry_run:
@@ -560,7 +590,7 @@ def scan_vault(
 
 # ── CLI ──────────────────────────────────────────────────────────────────────
 
-def main() -> None:
+def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
             "Resolve bare Wayback URLs in Obsidian clippings. "
@@ -573,7 +603,13 @@ def main() -> None:
     parser.add_argument("--dry-run", action="store_true",
                         help="Show what would change without writing files or state")
     parser.add_argument("--check-only", action="store_true",
-                        help="Only check for existing snapshots; never submit new ones")
+                        help="No-op: check-only is now the default. Kept so existing "
+                             "callers keep working unchanged; use --allow-save to "
+                             "arm live Save-Now submissions.")
+    parser.add_argument("--allow-save", action="store_true", dest="allow_save",
+                        help="Allow submitting new Wayback Save-Now requests. "
+                             "Without this flag, only existing snapshots are checked "
+                             "(this is now the default behaviour).")
     parser.add_argument("--all", action="store_true", dest="reprocess_all",
                         help="Re-resolve all notes (ignores state file)")
     parser.add_argument("--retry-failed", action="store_true",
@@ -584,9 +620,24 @@ def main() -> None:
     parser.add_argument("--from-source", action="store_true", dest="from_source",
                         help="When `archived` is empty, synthesize a Wayback lookup "
                              "URL from the note's `source:` field")
+    parser.add_argument("--max-files", type=int, default=0, dest="max_files",
+                        metavar="N",
+                        help="Stop after processing N files this run (0 = unlimited). "
+                             "State-skipped files don't count, so each run makes "
+                             "forward progress through the vault instead of "
+                             "rechecking the same head of the alphabet.")
     parser.add_argument("--log", action="store_true",
                         help="Write output to .archive_resolver.log in the clippings dir (keeps last 10 runs)")
+    return parser
+
+
+def main() -> None:
+    parser = build_arg_parser()
     args = parser.parse_args()
+
+    # --allow-save arms live SPN2 submissions; its absence is check-only.
+    # --check-only is accepted as a no-op alias for compatibility.
+    check_only = not args.allow_save
 
     clippings_dir = args.clippings_dir.expanduser().resolve()
     if not clippings_dir.is_dir():
@@ -597,7 +648,7 @@ def main() -> None:
         setup_logging(clippings_dir)
 
     # Check for IA credentials
-    if not get_ia_auth() and not args.check_only:
+    if not get_ia_auth() and not check_only:
         print("⚠  IA_ACCESS_KEY / IA_SECRET_KEY not set — Wayback saves will be skipped.",
               file=sys.stderr)
         print("   Get keys at: https://archive.org/account/s3.php\n", file=sys.stderr)
@@ -605,18 +656,19 @@ def main() -> None:
     print(f"Scanning: {clippings_dir}")
     if args.dry_run:
         print("(dry-run mode — no files or state will be written)")
-    if args.check_only:
+    if check_only:
         print("(check-only mode — no new archives will be submitted)")
     print()
 
     scan_vault(
         clippings_dir,
         args.dry_run,
-        args.check_only,
+        check_only,
         args.reprocess_all,
         args.retry_failed,
         args.retry_after,
         args.from_source,
+        args.max_files,
     )
 
 
