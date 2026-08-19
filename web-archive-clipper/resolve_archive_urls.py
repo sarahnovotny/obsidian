@@ -236,20 +236,47 @@ def get_ia_auth() -> dict | None:
 
 # ── Wayback Machine ──────────────────────────────────────────────────────────
 
+class RateLimited(Exception):
+    """archive.org kept throttling us after the full backoff schedule."""
+
+
+RATE_LIMIT_STATUSES = frozenset({429, 503})
+RATE_LIMIT_BACKOFF = (15, 45, 120)  # seconds to wait before each retry
+
+
 def wayback_check(original_url: str) -> str | None:
-    """Check Wayback availability API for an existing snapshot."""
-    try:
-        resp = requests.get(
-            WAYBACK_AVAIL_API,
-            params={"url": original_url},
-            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
-        )
-        resp.raise_for_status()
-        closest = resp.json().get("archived_snapshots", {}).get("closest", {})
-        if closest.get("available"):
-            return closest["url"]
-    except requests.RequestException as exc:
-        print(f"    ⚠  Wayback check error: {exc}", file=sys.stderr)
+    """Check the Wayback availability API for an existing snapshot.
+
+    Returns the snapshot URL, or None when archive.org answers cleanly that it
+    has nothing. Raises RateLimited when archive.org throttles us past the whole
+    backoff schedule, so the caller can stop the run rather than record every
+    remaining file as a permanent failure.
+    """
+    for attempt in range(len(RATE_LIMIT_BACKOFF) + 1):
+        try:
+            resp = requests.get(
+                WAYBACK_AVAIL_API,
+                params={"url": original_url},
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            )
+            if resp.status_code in RATE_LIMIT_STATUSES:
+                if attempt < len(RATE_LIMIT_BACKOFF):
+                    delay = RATE_LIMIT_BACKOFF[attempt]
+                    print(f"    ⏳ rate-limited ({resp.status_code}); retrying in {delay}s")
+                    time.sleep(delay)
+                    continue
+                raise RateLimited(
+                    f"archive.org returned {resp.status_code} after "
+                    f"{len(RATE_LIMIT_BACKOFF) + 1} attempts"
+                )
+            resp.raise_for_status()
+            closest = resp.json().get("archived_snapshots", {}).get("closest", {})
+            if closest.get("available"):
+                return closest["url"]
+            return None
+        except requests.RequestException as exc:
+            print(f"    ⚠  Wayback check error: {exc}", file=sys.stderr)
+            return None
     return None
 
 
@@ -463,7 +490,15 @@ def scan_vault(
             continue
 
         print(f"\n📄 {path.name}")
-        snapshot_url = process_file(path, dry_run, check_only, reprocess_all, from_source)
+        try:
+            snapshot_url = process_file(path, dry_run, check_only, reprocess_all, from_source)
+        except RateLimited as exc:
+            print(f"\n⛔ {exc}")
+            print("   Stopping here so the remaining files are not recorded as failures.")
+            print("   Progress so far has been saved — re-run to continue where this left off.")
+            if not dry_run:
+                save_state(clippings_dir, state)
+            return
 
         if snapshot_url == "BLOCKED":
             blocked += 1
