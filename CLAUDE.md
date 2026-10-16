@@ -11,7 +11,6 @@ web-archive-clipper/
 youtube-transcript-clipper/
   template.json          — Web Clipper template (captures YouTube videos with transcript)
   obsidian_capture_yt_transcript.py — Fetches and formats YouTube transcripts
-run_resolve_archive.sh   — Wrapper script for launchd (contains IA API keys, gitignored)
 ```
 
 ## Key paths

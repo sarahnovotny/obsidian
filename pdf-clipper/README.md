@@ -14,7 +14,7 @@ Already done if your machine has the sibling `web-archive-clipper` working. The 
 
 - **Python 3.12 venv** at `~/Github/python3.12-venv/` with `requests` + `python-frontmatter`
 - **poppler** (`pdfinfo`, `pdftotext`) on PATH — `brew install poppler`
-- **macOS Keychain** items `ia-spn2-access-key` and `ia-spn2-secret-key` (same items the resolver uses; see `../run_resolve_archive.sh`)
+- **macOS Keychain** items `ia-spn2-access-key` and `ia-spn2-secret-key` (same items the resolver uses; see `~/Github/scripts/obsidian/run_resolve_archive.sh`)
 
 Symlink onto PATH for convenience:
 
